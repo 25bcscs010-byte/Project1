@@ -1,0 +1,613 @@
+# 1. High-Level Design: Real-Time AI Finance Assistant with Pathway
+
+
+## 2. Data Sources
+
+### 2.1 Live Data Sources
+
+#### **Transaction Streams**
+- **UPI Payment APIs**: Real-time payment notifications via webhooks
+- **SMS Gateway**: Banking transaction alerts via SMS parsing
+- **Email Parser**: E-commerce receipts and payment confirmations
+- **Banking APIs**: Direct integration with HDFC, ICICI, SBI APIs
+
+```python
+# Pathway Connector for UPI Webhooks
+import pathway as pw
+
+transaction_stream = pw.io.http.read(
+    host="0.0.0.0",
+    port=8080,
+    schema=RawTransactionSchema,
+    format="json"
+)
+
+# Connector for SMS Gateway
+sms_stream = pw.io.kafka.read(
+    rdkafka_settings={
+        "bootstrap.servers": "kafka:9092",
+        "group.id": "sms-consumer"
+    },
+    topic="banking_sms",
+    schema=SMSSchema,
+    format="json"
+)
+```
+
+#### **Web Scraping Feeds**
+- **Product Price Monitoring**: Continuous scraping of e-commerce sites
+- **Coupon Aggregators**: Real-time coupon code updates
+- **Review Feeds**: Product review streams for sentiment analysis
+
+```python
+# Pathway Connector for Scraped Data
+scraped_products = pw.io.kafka.read(
+    rdkafka_settings={"bootstrap.servers": "kafka:9092"},
+    topic="scraped_products",
+    schema=ProductSchema,
+    format="json"
+)
+```
+
+#### **External APIs**
+- **Fraud Intelligence Feeds**: Real-time phishing domain blacklists
+- **Currency Exchange Rates**: Live forex rates
+- **Market Data**: Stock prices for investment recommendations
+
+### 2.2 Simulated Data Sources (Development/Testing)
+
+```python
+# Simulated transaction stream for testing
+simulated_transactions = pw.demo.range_stream(
+    nb_rows=1000,
+    schema=TransactionSchema,
+    freq=1.0  # 1 transaction per second
+)
+
+# CSV-based replay for historical testing
+historical_data = pw.io.csv.read(
+    path="./data/transactions_2024.csv",
+    schema=TransactionSchema,
+    mode="streaming"  # Replay with timestamps
+)
+
+# Manual test data injection
+test_transactions = pw.debug.table_from_rows(
+    schema=TransactionSchema,
+    rows=[
+        {"user_id": "test_user", "amount": 500, ...}
+    ]
+)
+```
+
+## 3. Pathway Streaming Ingestion & Transformations
+
+### 3.1 Streaming Ingestion Pipeline
+
+```
+┌─────────────────┐
+│  Data Sources   │
+│  (UPI, SMS,     │
+│   Email, Web)   │
+└────────┬────────┘
+         │
+         ↓
+┌─────────────────┐
+│ Pathway Input   │
+│   Connectors    │ ← pw.io.kafka.read()
+│                 │ ← pw.io.http.read()
+└────────┬────────┘
+         │
+         ↓
+┌─────────────────┐
+│   Streaming     │
+│ Transformations │ ← .select(), .filter(), .groupby()
+│                 │ ← .windowby(), .join()
+└────────┬────────┘
+         │
+         ↓
+┌─────────────────┐
+│ Pathway Output  │
+│   Connectors    │ → pw.io.kafka.write()
+│                 │ → pw.io.postgres.write()
+└─────────────────┘
+```
+
+### 3.2 Core Transformations
+
+#### **A. Transaction Normalization**
+
+```python
+# Parse and normalize transactions
+normalized = raw_transactions.select(
+    transaction_id=pw.apply(generate_id, pw.this.raw_data),
+    user_id=pw.this.user_id,
+    amount=pw.apply(extract_amount, pw.this.raw_data),
+    merchant=pw.apply(extract_merchant, pw.this.raw_data),
+    category=pw.apply(categorize, pw.this.raw_data),
+    timestamp=pw.this.timestamp
+)
+
+# Deduplicate within time window
+deduplicated = normalized.deduplicate(
+    col=pw.this.transaction_id,
+    acceptor=pw.latest(pw.this.timestamp)
+)
+```
+
+#### **B. Real-Time Aggregations**
+
+```python
+# Calculate rolling spending by category
+spending_by_category = transactions.windowby(
+    pw.this.timestamp,
+    window=pw.sliding(
+        duration=timedelta(days=30),
+        step=timedelta(hours=1)
+    )
+).reduce(
+    user_id=pw.this.user_id,
+    category=pw.this.category,
+    total_spent=pw.reducers.sum(pw.this.amount),
+    transaction_count=pw.reducers.count(),
+    window_start=pw.this._pw_window_start,
+    window_end=pw.this._pw_window_end
+)
+```
+
+#### **C. Stream Joins**
+
+```python
+# Join transactions with budget goals
+transactions_with_budgets = transactions.join(
+    budget_goals,
+    transactions.user_id == budget_goals.user_id,
+    transactions.category == budget_goals.category
+).select(
+    *pw.left,
+    budget_limit=pw.right.limit_amount,
+    budget_period=pw.right.period
+)
+
+# Temporal join for fraud detection
+suspicious_transactions = transactions.interval_join(
+    fraud_patterns,
+    transactions.timestamp,
+    fraud_patterns.detected_at,
+    interval=pw.temporal.interval(-timedelta(hours=1), timedelta(hours=0))
+).select(
+    *pw.left,
+    fraud_score=pw.right.risk_score
+)
+```
+
+#### **D. Stateful Processing**
+
+```python
+# Maintain running balance per user
+class BalanceTracker(pw.ClassArg):
+    balance: float = 0.0
+    
+    def update(self, amount: float) -> float:
+        self.balance += amount
+        return self.balance
+
+balance_state = transactions.groupby(pw.this.user_id).reduce(
+    user_id=pw.this.user_id,
+    running_balance=pw.reducers.stateful(
+        BalanceTracker(),
+        lambda state, amount: state.update(amount),
+        pw.this.amount
+    )
+)
+```
+
+## 4. Pathway Components Architecture
+
+### 4.1 Pathway Streaming Engine
+
+The core of the system leverages Pathway's streaming engine for:
+
+**Real-Time Data Processing:**
+```python
+# Pathway runs continuous computations on unbounded streams
+pw.run(
+    monitoring_level=pw.MonitoringLevel.ALL,
+    with_http_server=True  # Health checks & metrics
+)
+```
+
+**Automatic State Management:**
+- Pathway handles incremental updates automatically
+- No manual checkpointing required
+- Maintains consistency across transformations
+
+**Fault Tolerance:**
+```python
+# Built-in fault tolerance with Kafka
+transactions = pw.io.kafka.read(
+    rdkafka_settings={
+        "bootstrap.servers": "kafka:9092",
+        "auto.offset.reset": "earliest",  # Resume from last checkpoint
+        "enable.auto.commit": "true"
+    },
+    topic="transactions",
+    schema=TransactionSchema
+)
+```
+
+### 4.2 Pathway Input/Output Connectors
+
+#### **Input Connectors Used**
+
+| Connector | Purpose | Configuration |
+|-----------|---------|---------------|
+| `pw.io.kafka.read()` | Transaction streams, scraped data | Topic-based consumption |
+| `pw.io.http.read()` | Webhook ingestion (UPI callbacks) | REST endpoint server |
+| `pw.io.postgres.read()` | User preferences, budget goals | Change data capture |
+| `pw.io.csv.read()` | Historical data replay | Streaming mode |
+| `pw.io.fs.read()` | Log files, batch imports | Directory watching |
+
+#### **Output Connectors Used**
+
+| Connector | Purpose | Configuration |
+|-----------|---------|---------------|
+| `pw.io.kafka.write()` | Event publishing to message bus | Multi-topic routing |
+| `pw.io.postgres.write()` | Persistent storage (transactions, alerts) | Upsert mode |
+| `pw.io.http.write()` | Webhook notifications | POST to external services |
+| `pw.io.jsonlines.write()` | Audit logging | Append-only logs |
+
+```python
+# Multi-output pattern
+pw.io.kafka.write(
+    transactions,
+    rdkafka_settings={"bootstrap.servers": "kafka:9092"},
+    topic="transactions"
+)
+
+pw.io.postgres.write(
+    transactions,
+    postgres_settings=pw.io.postgres.PostgresSettings(
+        host="localhost",
+        port=5432,
+        dbname="financeai",
+        user="admin",
+        password="password"
+    ),
+    table_name="transactions"
+)
+```
+
+### 4.3 Pathway Document Store
+
+**Purpose:** Stores processed documents for RAG (Retrieval-Augmented Generation)
+
+```python
+# Initialize Pathway Document Store
+from pathway.xpacks.llm import embedders, vector_store
+
+# Embed financial documents
+embedder = embedders.SentenceTransformerEmbedder(
+    model="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+# Create documents from transaction summaries
+documents = financial_summaries.select(
+    data=pw.apply(
+        lambda row: f"User spent ₹{row.amount} on {row.category} at {row.merchant}",
+        pw.this
+    ),
+    metadata=pw.apply(
+        lambda row: {"user_id": row.user_id, "category": row.category},
+        pw.this
+    )
+)
+
+# Build vector store
+vector_db = vector_store.WeaviateVectorStore(
+    host="localhost",
+    port=8080,
+    index_name="financial_docs"
+)
+
+# Index documents with embeddings
+indexed_docs = documents + embedder(documents.data)
+vector_db.insert(indexed_docs)
+```
+
+**Document Types Indexed:**
+1. **Transaction Records**: Individual purchase details
+2. **Monthly Summaries**: Aggregated spending reports
+3. **Budget Alerts**: Overspending notifications
+4. **Fraud Alerts**: Suspicious activity reports
+5. **Savings Opportunities**: Cheaper alternative recommendations
+6. **Financial Insights**: AI-generated advice
+
+### 4.4 LLM & RAG Integration
+
+#### **A. RAG Pipeline with Pathway**
+
+```python
+from pathway.xpacks.llm import llms, prompts
+
+# Define LLM
+llm = llms.LiteLLMChat(
+    model="claude-sonnet-4-20250514",
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    temperature=0.7
+)
+
+# RAG Query Processing
+def answer_query(query: str, user_id: str):
+    # 1. Embed query
+    query_embedding = embedder.embed_query(query)
+    
+    # 2. Retrieve relevant documents
+    relevant_docs = vector_db.similarity_search(
+        query_embedding,
+        filters={"user_id": user_id},
+        top_k=5
+    )
+    
+    # 3. Build context
+    context = "\n".join([doc.data for doc in relevant_docs])
+    
+    # 4. Generate response with LLM
+    prompt = f"""Based on the following financial data:
+{context}
+
+User Question: {query}
+
+Provide a helpful, accurate response about their finances."""
+    
+    response = llm.generate(prompt)
+    return response
+
+# Stream-based RAG
+chat_queries = pw.io.kafka.read(
+    topic="chat_queries",
+    schema=ChatQuerySchema
+)
+
+responses = chat_queries.select(
+    query_id=pw.this.query_id,
+    user_id=pw.this.user_id,
+    response=pw.apply(answer_query, pw.this.query, pw.this.user_id)
+)
+
+pw.io.kafka.write(responses, topic="chat_responses")
+```
+
+#### **B. Streaming LLM Calls**
+
+```python
+# Process fraud alerts with LLM explanations
+fraud_alerts_with_explanation = fraud_alerts.select(
+    *pw.this,
+    explanation=pw.apply_async(
+        lambda alert: llm.generate(
+            f"Explain this fraud alert in simple terms: {alert}"
+        ),
+        pw.this
+    )
+)
+```
+
+#### **C. Context Window Management**
+
+```python
+# Maintain conversation history per user
+conversation_history = chat_messages.windowby(
+    pw.this.timestamp,
+    window=pw.session(
+        predicate=lambda prev, curr: (
+            curr.timestamp - prev.timestamp < timedelta(minutes=30)
+        )
+    )
+).reduce(
+    conversation_id=pw.this.conversation_id,
+    user_id=pw.this.user_id,
+    messages=pw.reducers.sorted_tuple(
+        pw.this.timestamp,
+        pw.this.message
+    ),
+    message_count=pw.reducers.count()
+)
+
+# Limit context window to last 10 messages
+limited_context = conversation_history.select(
+    *pw.this,
+    context=pw.apply(lambda msgs: msgs[-10:], pw.this.messages)
+)
+```
+
+## 5. End-to-End Data Flow
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        DATA SOURCES                               │
+├──────────┬──────────┬──────────┬──────────┬──────────────────────┤
+│   UPI    │   SMS    │  Email   │   Web    │   External APIs      │
+│  Stream  │  Stream  │  Stream  │ Scraping │  (Fraud Intel, etc.) │
+└────┬─────┴────┬─────┴────┬─────┴────┬─────┴──────────┬───────────┘
+     │          │          │          │                │
+     └──────────┴──────────┴──────────┴────────────────┘
+                         │
+                         ↓
+            ┌────────────────────────────┐
+            │   PATHWAY INPUT CONNECTORS │
+            │  (Kafka, HTTP, Postgres)   │
+            └────────────┬───────────────┘
+                         │
+                         ↓
+            ┌────────────────────────────┐
+            │   STREAMING TRANSFORMATIONS│
+            ├────────────────────────────┤
+            │ • Normalization            │
+            │ • Deduplication            │
+            │ • Categorization           │
+            │ • Aggregation              │
+            │ • Joins                    │
+            │ • Windowing                │
+            └────────────┬───────────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         │               │               │
+         ↓               ↓               ↓
+┌────────────┐  ┌────────────┐  ┌────────────┐
+│   Fraud    │  │   Budget   │  │   Price    │
+│ Detection  │  │  Tracking  │  │Intelligence│
+└──────┬─────┘  └──────┬─────┘  └──────┬─────┘
+       │               │               │
+       └───────────────┼───────────────┘
+                       │
+                       ↓
+          ┌────────────────────────┐
+          │  Financial Summarization│
+          │   + Insight Generation  │
+          └────────────┬───────────┘
+                       │
+                       ↓
+          ┌────────────────────────┐
+          │   PATHWAY DOCUMENT STORE│
+          ├────────────────────────┤
+          │ • Embedding Generation │
+          │ • Vector Indexing      │
+          │ • Similarity Search    │
+          └────────────┬───────────┘
+                       │
+                       ↓
+          ┌────────────────────────┐
+          │   LLM + RAG PIPELINE   │
+          ├────────────────────────┤
+          │ • Query Embedding      │
+          │ • Context Retrieval    │
+          │ • LLM Response Gen     │
+          └────────────┬───────────┘
+                       │
+                       ↓
+          ┌────────────────────────┐
+          │ Conversational AI Output│
+          │   (Chat Responses)      │
+          └─────────────────────────┘
+```
+
+## 6. Key Pathway Features Utilized
+
+### 6.1 Real-Time Stream Processing
+- **Unbounded Streams**: Continuous processing without batch boundaries
+- **Low Latency**: Sub-second processing for fraud detection and alerts
+- **Incremental Computation**: Only recompute changed data
+
+### 6.2 Temporal Operations
+```python
+# Sliding windows for rolling calculations
+spending_trends = transactions.windowby(
+    pw.this.timestamp,
+    window=pw.sliding(duration=timedelta(days=7), step=timedelta(days=1))
+).reduce(
+    user_id=pw.this.user_id,
+    weekly_spend=pw.reducers.sum(pw.this.amount)
+)
+
+# Session windows for conversation grouping
+conversations = messages.windowby(
+    pw.this.timestamp,
+    window=pw.session(
+        predicate=lambda prev, curr: curr.timestamp - prev.timestamp < timedelta(minutes=30)
+    )
+)
+```
+
+### 6.3 Stateful Processing
+- **Persistent State**: User balances, budget progress
+- **Automatic Recovery**: State restored after failures
+- **Exactly-Once Semantics**: No duplicate processing
+
+### 6.4 LLM Integration
+- **Native LLM Support**: Direct API calls to Claude, GPT, etc.
+- **Async Processing**: Non-blocking LLM calls
+- **RAG Framework**: Built-in document store and retrieval
+
+### 6.5 Multi-Output Pattern
+```python
+# Single pipeline, multiple outputs
+transactions_processed = process_transactions(raw_transactions)
+
+# Output to different sinks
+pw.io.kafka.write(transactions_processed, topic="transactions")
+pw.io.postgres.write(transactions_processed, table="transactions")
+pw.io.jsonlines.write(transactions_processed, "audit_log.jsonl")
+```
+
+## 7. Deployment Architecture
+
+```python
+# main.py - Production deployment
+import pathway as pw
+
+# Configure all inputs
+upi_stream = pw.io.kafka.read(...)
+sms_stream = pw.io.kafka.read(...)
+web_stream = pw.io.kafka.read(...)
+
+# Build processing pipeline
+processed = process_all_streams(upi_stream, sms_stream, web_stream)
+
+# Configure all outputs
+pw.io.kafka.write(processed.transactions, topic="transactions")
+pw.io.kafka.write(processed.alerts, topic="fraud_alerts")
+pw.io.postgres.write(processed.summaries, table="monthly_summaries")
+
+# Run with monitoring
+pw.run(
+    monitoring_level=pw.MonitoringLevel.ALL,
+    with_http_server=True,
+    http_port=8080
+)
+```
+
+### 7.1 Scaling Strategy
+- **Horizontal Scaling**: Multiple Pathway workers consuming from Kafka partitions
+- **Vertical Scaling**: Increase worker resources for compute-heavy operations
+- **Elastic Scaling**: Auto-scale based on stream lag and throughput
+
+### 7.2 Monitoring & Observability
+```python
+# Built-in metrics
+import pathway as pw
+
+pw.run(
+    monitoring_level=pw.MonitoringLevel.ALL,
+    with_http_server=True  # Exposes /metrics endpoint
+)
+
+# Custom metrics
+from pathway.stdlib.utils import prometheus
+
+metrics = prometheus.create_metric_server(port=9090)
+metrics.gauge("transactions_processed", transactions.count())
+metrics.histogram("processing_latency_ms", latency_distribution)
+```
+
+## 8. Advantages of Pathway for This Use Case
+
+1. **Real-Time by Design**: Native streaming without batch delays
+2. **Unified API**: Same code for batch and streaming processing
+3. **Built-in LLM Support**: First-class RAG and LLM integration
+4. **Automatic State Management**: No manual checkpointing
+5. **Python-Native**: Easy integration with ML/AI ecosystem
+6. **Production-Ready**: Fault tolerance, exactly-once semantics
+7. **Incremental Updates**: Efficient recomputation on data changes
+8. **Temporal Joins**: Native support for time-based operations
+
+## 9. Conclusion
+
+This design leverages Pathway's unique capabilities to build a real-time AI finance assistant that:
+- Ingests live transaction streams from multiple sources
+- Performs complex transformations and aggregations in real-time
+- Detects fraud and anomalies with sub-second latency
+- Provides intelligent insights through RAG-powered conversational AI
+- Scales horizontally with production-grade reliability
+
+The system is production-ready, maintainable, and can be deployed incrementally with each subsystem operating independently through Pathway's streaming engine.

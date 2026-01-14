@@ -1,0 +1,130 @@
+graph TB
+    subgraph "DATA SOURCES"
+        UPI[UPI Webhooks]
+        SMS[SMS Gateway]
+        EMAIL[Email Parser]
+        WEB[Web Scraping]
+        API[External APIs]
+    end
+    
+    subgraph "PATHWAY INPUT CONNECTORS"
+        KAFKA_IN[pw.io.kafka.read]
+        HTTP_IN[pw.io.http.read]
+        PG_IN[pw.io.postgres.read]
+        CSV_IN[pw.io.csv.read]
+    end
+    
+    subgraph "PATHWAY STREAMING ENGINE"
+        subgraph "TRANSFORMATIONS"
+            NORM[Normalization<br/>select, filter]
+            DEDUP[Deduplication<br/>deduplicate]
+            AGG[Aggregation<br/>groupby, reduce]
+            JOIN[Stream Joins<br/>join, interval_join]
+            WINDOW[Windowing<br/>windowby, sliding]
+        end
+        
+        subgraph "PROCESSING SUBSYSTEMS"
+            FRAUD[Fraud Detection]
+            BUDGET[Budget Tracking]
+            PRICE[Price Intelligence]
+            SUMMARY[Summarization]
+        end
+    end
+    
+    subgraph "PATHWAY DOCUMENT STORE"
+        EMBED[Embedding Generation<br/>SentenceTransformer]
+        VECTOR[Vector Store<br/>Weaviate]
+        SEARCH[Similarity Search<br/>top_k retrieval]
+    end
+    
+    subgraph "LLM & RAG"
+        RAG_PIPE[RAG Pipeline<br/>Context Assembly]
+        LLM[LLM API<br/>Claude/GPT]
+        RESPONSE[Response Generation]
+    end
+    
+    subgraph "PATHWAY OUTPUT CONNECTORS"
+        KAFKA_OUT[pw.io.kafka.write]
+        PG_OUT[pw.io.postgres.write]
+        HTTP_OUT[pw.io.http.write]
+        JSON_OUT[pw.io.jsonlines.write]
+    end
+    
+    subgraph "OUTPUT DESTINATIONS"
+        EVENT_BUS[Event Bus<br/>Kafka Topics]
+        DATABASE[PostgreSQL<br/>Persistent Store]
+        WEBHOOK[Webhooks<br/>Notifications]
+        LOGS[Audit Logs]
+        CHAT[Chat Interface]
+    end
+    
+    %% Input flow
+    UPI --> HTTP_IN
+    SMS --> KAFKA_IN
+    EMAIL --> KAFKA_IN
+    WEB --> KAFKA_IN
+    API --> HTTP_IN
+    
+    %% Connector to engine
+    KAFKA_IN --> NORM
+    HTTP_IN --> NORM
+    PG_IN --> NORM
+    CSV_IN --> NORM
+    
+    %% Transformation pipeline
+    NORM --> DEDUP
+    DEDUP --> AGG
+    AGG --> JOIN
+    JOIN --> WINDOW
+    
+    %% Processing flow
+    WINDOW --> FRAUD
+    WINDOW --> BUDGET
+    WINDOW --> PRICE
+    FRAUD --> SUMMARY
+    BUDGET --> SUMMARY
+    PRICE --> SUMMARY
+    
+    %% Document store flow
+    SUMMARY --> EMBED
+    EMBED --> VECTOR
+    VECTOR --> SEARCH
+    
+    %% RAG flow
+    SEARCH --> RAG_PIPE
+    RAG_PIPE --> LLM
+    LLM --> RESPONSE
+    
+    %% Output flow
+    FRAUD --> KAFKA_OUT
+    BUDGET --> KAFKA_OUT
+    PRICE --> KAFKA_OUT
+    SUMMARY --> PG_OUT
+    RESPONSE --> HTTP_OUT
+    NORM --> JSON_OUT
+    
+    %% Final destinations
+    KAFKA_OUT --> EVENT_BUS
+    PG_OUT --> DATABASE
+    HTTP_OUT --> WEBHOOK
+    JSON_OUT --> LOGS
+    RESPONSE --> CHAT
+    
+    style NORM fill:#e1f5ff
+    style DEDUP fill:#e1f5ff
+    style AGG fill:#e1f5ff
+    style JOIN fill:#e1f5ff
+    style WINDOW fill:#e1f5ff
+    
+    style FRAUD fill:#fff4e6
+    style BUDGET fill:#fff4e6
+    style PRICE fill:#fff4e6
+    style SUMMARY fill:#fff4e6
+    
+    style EMBED fill:#f3e5f5
+    style VECTOR fill:#f3e5f5
+    style SEARCH fill:#f3e5f5
+    
+    style RAG_PIPE fill:#e8f5e9
+    style LLM fill:#e8f5e9
+    style RESPONSE fill:#e8f5e9
